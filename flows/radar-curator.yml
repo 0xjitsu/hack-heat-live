@@ -1,0 +1,132 @@
+# Radar curator. Path A, Supervised autonomy.
+# Paste this file into GitLab → AI → Flows → New flow → Configuration.
+# Custom flows reject top-level name, description, and product_group.
+# Display name to type in the form: Radar curator
+# Description: Reviews a candidate Hack Heat row, then waits for a human
+# to approve the board update.
+version: v1
+environment: ambient
+coding_environment: full
+components:
+  - name: curator_agent
+    type: AgentComponent
+    prompt_id: curator_prompt
+    inputs:
+      - from: "context:project_id"
+        as: "project_id"
+      - from: "context:goal"
+        as: "goal"
+    toolset:
+      - read_file
+      - list_dir
+      - find_files
+      - grep
+      - get_merge_request
+      - run_command
+    ui_log_events:
+      - on_agent_final_answer
+      - on_tool_execution_success
+      - on_tool_execution_failed
+  - name: outcome_gate
+    type: HumanInputComponent
+    sends_response_to: curator_agent
+    interaction_type: "approval"
+    inputs:
+      - from: "context:curator_agent.final_answer"
+        as: "review"
+    message_template: |
+      Supervised outcome gate for Hack Heat Live.
+      Approve to let the publisher write the row and post the review.
+      Modify to send the review back. Reject to leave the board unchanged.
+      Review:
+      {{review}}
+    ui_log_events:
+      - on_user_input_prompt
+      - on_user_response
+  - name: publisher_agent
+    type: AgentComponent
+    prompt_id: publisher_prompt
+    inputs:
+      - from: "context:project_id"
+        as: "project_id"
+      - from: "context:goal"
+        as: "goal"
+      - from: "context:outcome_gate.approval"
+        as: "human_decision"
+      - from: "context:curator_agent.final_answer"
+        as: "review"
+    toolset:
+      - read_file
+      - run_command
+      - edit_file
+      - create_merge_request_note
+      - get_merge_request
+    ui_log_events:
+      - on_agent_final_answer
+      - on_tool_execution_success
+      - on_tool_execution_failed
+prompts:
+  - prompt_id: curator_prompt
+    name: Radar curator review
+    prompt_template:
+      system: |
+        You are the Hack Heat radar curator for project {{project_id}}.
+        A person has opened a merge request that proposes a new or updated
+        row on the weekly SEA hackathon board. You review. You do not edit.
+        Steps:
+        1. Read the merge request named in the goal and find the candidate JSON.
+        2. Run: python3 -m hackheat.curator validate PATH_TO_CANDIDATE
+        3. Use the command's JSON. Check the deadline parses, the next gate is
+           still in the future, prizeAmountUsd is a number when present, and
+           the PH/SG eligibility block is present.
+        4. Your final answer is a short review: verdict, next gate in
+           Asia/Singapore, PH/SG status, errors, warnings, and the id.
+           Say that a human must approve before the board changes.
+        When the review is written, stop. No further steps are needed after that.
+      user: |
+        Project: {{project_id}}
+        {{goal}}
+      placeholder: history
+    unit_primitives: []
+    params:
+      timeout: 180
+  - prompt_id: publisher_prompt
+    name: Radar curator publisher
+    prompt_template:
+      system: |
+        You publish a Hack Heat board update only after the supervised outcome
+        gate. Project: {{project_id}}. Human decision: {{human_decision}}.
+        If the human decision is not approve, stop and do not edit files.
+        If it is approve:
+        1. Post the review on the merge request with create_merge_request_note.
+        2. Run: python3 -m hackheat.curator apply PATH_TO_CANDIDATE --board data/opportunities.json --approved-by "supervised-outcome-gate"
+           only when the review verdict was approve. The command refuses any
+           other verdict, and it refuses to run without --approved-by.
+        3. Do not merge the merge request. Merging and the Cloud Run production
+           deploy stay with a person. That is the govern step.
+        When the note is posted, or when you correctly refuse to write, your
+        final answer states what changed. No further steps are needed after that.
+      user: |
+        Project: {{project_id}}
+        Decision: {{human_decision}}
+        Review: {{review}}
+        {{goal}}
+      placeholder: history
+    unit_primitives: []
+    params:
+      timeout: 180
+routers:
+  - from: curator_agent
+    to: outcome_gate
+  - from: outcome_gate
+    condition:
+      input: "context:outcome_gate.approval"
+      routes:
+        "approve": publisher_agent
+        "modify": curator_agent
+        "reject": end
+        default_route: end
+  - from: publisher_agent
+    to: end
+flow:
+  entry_point: curator_agent

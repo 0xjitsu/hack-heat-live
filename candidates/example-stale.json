@@ -1,0 +1,14 @@
+{
+  "id": "sample-already-closed-2026",
+  "name": "Sample Already Closed",
+  "lane": "code",
+  "tags": ["agents"],
+  "deadline": "2026-09-01T00:00:00Z",
+  "remote": true,
+  "residencyRisk": "Online. PH/SG OK.",
+  "applyUrl": "https://example.com/sample-already-closed",
+  "fit": "SAMPLE CANDIDATE that the curator must reject because the deadline has passed.",
+  "format": "hackathon",
+  "mode": "online",
+  "prizeAmountUsd": 1000
+}

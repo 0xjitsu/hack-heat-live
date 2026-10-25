@@ -1,0 +1,61 @@
+# Hack Heat Live — lint, test, and build on every push.
+# secure and monitor are extra stages so the pipeline history shows more of
+# the post-code lifecycle. deploy_production is the supervised gate: the
+# pipeline passes without it, and a person starts it on purpose.
+
+stages:
+  - lint
+  - test
+  - secure
+  - build
+  - monitor
+
+default:
+  image: python:3.12-slim
+  interruptible: true
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+lint:
+  stage: lint
+  script:
+    - python -m hackheat.ci lint
+
+test:
+  stage: test
+  script:
+    - python -m unittest discover -s tests -v
+
+secure:
+  stage: secure
+  script:
+    - python -m hackheat.ci secrets
+
+build:
+  stage: build
+  script:
+    - python -m hackheat.ci package
+    - python -m hackheat.ci deploy-check
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1 week
+
+freshness:
+  stage: monitor
+  script:
+    - python -m hackheat.ci freshness
+
+# Supervised production gate. Optional, so a normal pipeline stays green.
+# Playing this job does not call gcloud. It prints the Cloud Run command
+# after checking the deployment files. Run that command from a logged-in shell.
+deploy_production:
+  stage: monitor
+  when: manual
+  allow_failure: true
+  script:
+    - python -m hackheat.ci deploy-check

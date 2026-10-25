@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "hack-heat-live": {
+      "type": "stdio",
+      "command": "python3",
+      "args": ["-m", "hackheat.mcp_server"],
+      "approvedTools": [
+        "query_board",
+        "list_closing",
+        "list_eligible",
+        "list_by_prize",
+        "get_opportunity",
+        "board_status"
+      ]
+    }
+  }
+}

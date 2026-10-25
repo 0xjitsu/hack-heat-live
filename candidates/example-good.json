@@ -1,0 +1,19 @@
+{
+  "id": "sample-sea-agents-2026",
+  "name": "Sample SEA Agents Weekend",
+  "lane": "code",
+  "tags": ["agents", "mcp"],
+  "deadline": "2027-03-01T13:00:00Z",
+  "deadlineLabel": "Mon 1 Mar 2027 21:00 SGT — sample row for the curator demo",
+  "prize": "$12,000 demo pool",
+  "remote": true,
+  "residencyRisk": "Online. Standard Devpost exclusions only; PH/SG OK.",
+  "applyUrl": "https://example.com/sample-sea-agents",
+  "infoUrl": "https://example.com/sample-sea-agents",
+  "fit": "SAMPLE CANDIDATE for the curator demo. Not a real call.",
+  "format": "hackathon",
+  "mode": "online",
+  "prizeLabel": "$12,000 demo pool",
+  "prizeAmountUsd": 12000,
+  "prizeAmountNote": "cash"
+}
