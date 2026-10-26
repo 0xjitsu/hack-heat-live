@@ -8,7 +8,14 @@ stages:
   - test
   - secure
   - build
+  - release
   - monitor
+
+# GitLab's own SAST and secret detection (available on every tier).
+# Their jobs are moved into the secure stage next to the repo's secret scan.
+include:
+  - template: Jobs/SAST.gitlab-ci.yml
+  - template: Jobs/Secret-Detection.gitlab-ci.yml
 
 default:
   image: python:3.12-slim
@@ -35,6 +42,12 @@ secure:
   script:
     - python -m hackheat.ci secrets
 
+sast:
+  stage: secure
+
+secret_detection:
+  stage: secure
+
 build:
   stage: build
   script:
@@ -44,6 +57,22 @@ build:
     paths:
       - dist/
     expire_in: 1 week
+
+# Runs only when a tag such as v0.1.0 is pushed. Creates a GitLab Release.
+release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/cli:latest
+  rules:
+    - if: $CI_COMMIT_TAG
+  needs:
+    - job: build
+      artifacts: true
+  script:
+    - echo "Creating release $CI_COMMIT_TAG"
+  release:
+    tag_name: $CI_COMMIT_TAG
+    name: "Hack Heat Live $CI_COMMIT_TAG"
+    description: "Hack Heat Live $CI_COMMIT_TAG. Path A, Supervised. The zip bundle is the build job artifact."
 
 freshness:
   stage: monitor
@@ -57,5 +86,8 @@ deploy_production:
   stage: monitor
   when: manual
   allow_failure: true
+  environment:
+    name: production
+    action: prepare
   script:
     - python -m hackheat.ci deploy-check

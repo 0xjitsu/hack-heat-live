@@ -1,0 +1,8 @@
+# Flow execution settings for GitLab Duo Agent Platform (CI/CD runner).
+# GitLab reads this file from the default branch only.
+# The default flow image ships Python 3.12 as python3.12. The curator flow
+# calls `python3 -m hackheat.curator`, so make sure `python3` resolves.
+# Stdlib only, so there is nothing to pip install.
+setup_script:
+  - command -v python3 >/dev/null 2>&1 || ln -sf "$(command -v python3.12)" /usr/local/bin/python3
+  - python3 --version

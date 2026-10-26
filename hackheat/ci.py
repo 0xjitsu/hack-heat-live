@@ -71,10 +71,50 @@ def lint() -> None:
     names = {tool["name"] for tool in TOOLS}
     if approved != names:
         raise SystemExit(f"approvedTools {sorted(approved)} does not match server tools {sorted(names)}.")
+    _check_agent_config()
+    _check_pipeline()
     agent = (ROOT / "agents" / "radar-curator.yml").read_text(encoding="utf-8")
     if "system_prompt:" not in agent or "name:" not in agent:
         raise SystemExit("agents/radar-curator.yml is missing name or system_prompt.")
     print(f"lint ok — {len(board.items)} rows, flow gate present, {len(names)} MCP tools")
+
+
+AGENT_CONFIG_KEYS = {"image", "setup_script", "network_policy", "cache"}
+
+PIPELINE_SNIPPETS = (
+    "template: Jobs/SAST.gitlab-ci.yml",
+    "template: Jobs/Secret-Detection.gitlab-ci.yml",
+    "  - release\n",
+    "  - secure\n",
+    "when: manual",
+    "tag_name: $CI_COMMIT_TAG",
+)
+
+
+def _check_agent_config() -> None:
+    """Duo flow execution config: only keys GitLab documents, and python3 must resolve."""
+    path = ROOT / ".gitlab" / "duo" / "agent-config.yml"
+    if not path.exists():
+        raise SystemExit(".gitlab/duo/agent-config.yml is missing.")
+    text = path.read_text(encoding="utf-8")
+    keys = set(re.findall(r"(?m)^([A-Za-z_]+):", text))
+    unknown = keys - AGENT_CONFIG_KEYS
+    if unknown:
+        raise SystemExit(f"agent-config.yml has unsupported keys: {sorted(unknown)}")
+    if "python3" not in text:
+        raise SystemExit("agent-config.yml must make python3 available to the curator flow.")
+
+
+def _check_pipeline() -> None:
+    text = (ROOT / ".gitlab-ci.yml").read_text(encoding="utf-8")
+    for snippet in PIPELINE_SNIPPETS:
+        if snippet not in text:
+            raise SystemExit(f".gitlab-ci.yml is missing {snippet.strip()!r}.")
+    declared = set(re.findall(r"(?m)^  - ([a-z_-]+)$", text.split("include:")[0]))
+    used = set(re.findall(r"(?m)^  stage: ([a-z_-]+)$", text))
+    missing = used - declared
+    if missing:
+        raise SystemExit(f".gitlab-ci.yml uses undeclared stages: {sorted(missing)}")
 
 
 def secrets() -> None:
