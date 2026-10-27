@@ -73,3 +73,13 @@ class SecretPatternTests(unittest.TestCase):
         self.assertTrue(any(pattern.search(sample) for pattern in SECRET_PATTERNS))
         example = Path(".env.example").read_text(encoding="utf-8")
         self.assertFalse(any(pattern.search(example) for pattern in SECRET_PATTERNS))
+
+
+class GitLabConfigTests(unittest.TestCase):
+    def test_lint_checks_duo_exec_config_and_pipeline(self):
+        from hackheat import ci
+
+        ci._check_agent_config()
+        ci._check_pipeline()
+        text = Path(".gitlab/duo/agent-config.yml").read_text(encoding="utf-8")
+        self.assertIn("python3.12", text)

@@ -55,7 +55,8 @@ Three pieces, all in the repo:
 
 1. **MCP client.** `.gitlab/duo/mcp.json` starts this server over stdio and pre-approves `query_board`, `list_closing`, `list_eligible`, `list_by_prize`, `get_opportunity`, and `board_status`. Duo CLI and the IDE extension load that file. `POST /mcp` speaks the same JSON-RPC for a remote client after Cloud Run.
 2. **Custom flow.** `flows/radar-curator.yml` is flow-registry v1. Paste it into **AI → Flows**. `curator_agent` runs `python3 -m hackheat.curator validate` on the candidate in the merge request. `outcome_gate` is one `HumanInputComponent` (Approve / Modify / Reject). `publisher_agent` runs only after Approve, posts the review, and applies the row with `--approved-by`. Per-tool approval is off. One human decision is the Supervised level. Assisted would have stopped on every tool. Hands-off would have merged and deployed with nobody watching.
-3. **Custom agent.** `agents/radar-curator.yml` is the chat/IDE agent. Custom flows do not call a catalog agent. They carry their own prompts. The agent exists so Duo Chat can ask the board through MCP without starting the write flow.
+3. **Flow execution config.** `.gitlab/duo/agent-config.yml` makes `python3` resolve in GitLab's default flow image, so the curator can run the validator. GitLab reads it from the default branch only.
+4. **Custom agent.** `agents/radar-curator.yml` is the chat/IDE agent. Custom flows do not call a catalog agent. They carry their own prompts. The agent exists so Duo Chat can ask the board through MCP without starting the write flow.
 
 Import, enablement, and the mention to type are in [docs/GITLAB_IMPORT.md](docs/GITLAB_IMPORT.md).
 
@@ -76,8 +77,8 @@ The good sample is valid and still does not touch `data/opportunities.json`. The
 | Create | After approval, the publisher writes the normalized row and the MR note |
 | Verify | `lint` and `unittest`, including the MCP "closing this week" test and the flow-file checks |
 | Package | `python -m hackheat.ci package` builds `dist/hack-heat-live-0.1.0.zip`. `Dockerfile` builds the image |
-| Secure | `python -m hackheat.ci secrets` fails the pipeline on private keys and common token prefixes |
-| Release | The zip artifact is the release bundle. Production is not tagged automatically |
+| Secure | GitLab SAST and Secret Detection templates run in the `secure` stage, and `python -m hackheat.ci secrets` fails the pipeline on private keys and common token prefixes |
+| Release | Pushing a tag such as `v0.1.0` runs the `release` job, which creates a GitLab Release. The zip artifact is the bundle. Nothing is tagged automatically |
 | Configure | `deploy/cloudrun/service.yaml` and the Dockerfile. Port 8080, scale to zero |
 | Monitor | `freshness` CI job and `GET /api/freshness` report open rows and the next gate |
 | Govern | The outcome gate, plus a manual `deploy_production` job. A person merges the MR |

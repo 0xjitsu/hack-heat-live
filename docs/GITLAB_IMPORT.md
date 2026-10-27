@@ -1,6 +1,6 @@
 # Import this repo into GitLab and turn on Duo
 
-Do this in the provisioned hackathon project if it exists. Duo Agent Platform is enabled for the group GitLab creates after contributor approval. A personal public project is the fallback while that project is still pending. The project has to be **public**. The MIT `LICENSE` file has to stay at the repo root so it shows in About.
+Do this in the provisioned hackathon project if it exists. Duo Agent Platform is enabled for the group GitLab creates after contributor approval. GitLab's docs say the Agent Platform needs a project in a **group** namespace, and on the Free tier it uses purchased GitLab Credits, so a personal project can carry the code and the pipeline history but may not run the flow. Use a personal public project only for the code and pipeline while the provisioned project is pending. The project has to be **public**. The MIT `LICENSE` file has to stay at the repo root so it shows in About.
 
 These steps do not register or submit the Devpost entry. That stays a separate, manual action.
 
@@ -44,6 +44,10 @@ You need the Maintainer or Owner role.
 3. Under **Custom and external agents and flows**, turn on **Allow custom flows**.
 4. Under **External MCP tools**, turn on **Allow external MCP tools**. Save.
 5. On the project, confirm **AI → Flows** and **AI → Agents** are visible. If they are not, Duo is not on for this group yet. Use the provisioned hackathon project instead of a personal one.
+
+## 3b. Flow execution image
+
+`.gitlab/duo/agent-config.yml` is already in the repo. Flows run in GitLab's default flow image, which ships Python 3.12. The setup script makes sure `python3` points at it. GitLab only reads this file from the default branch, so it must be on `main` in the GitLab project before the first flow run.
 
 ## 4. Register the radar-curator flow
 
@@ -106,7 +110,7 @@ For Cloud Run later, add the HTTP block in `deploy/cloudrun/README.md`. Do that 
 3. Open a merge request.
 4. If you used the mention trigger, comment: `@ai-radar-curator-GROUP Review the candidate JSON and validate the deadline and PH/SG eligibility.`
 5. Wait for the curator summary.
-6. On the outcome gate, click **Approve** once. Do not approve individual tool calls. There is one decision.
+6. Open the flow session (the link in the MR note, or **AI → Sessions**). On the outcome gate, click **Approve** once. Do not approve individual tool calls. There is one decision.
 7. Confirm the publisher commented and, if the verdict was approve, updated `data/opportunities.json`.
 8. Try `candidates/example-stale.json` in a second MR. The validator rejects it. Do not approve a write.
 9. Leave the MR unmerged until you are happy with the diff. Then merge it yourself.
