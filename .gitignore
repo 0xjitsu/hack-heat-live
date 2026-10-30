@@ -10,3 +10,4 @@ dist/
 
 # Local bounty jar store (sandbox pledges)
 var/
+.vercel
