@@ -26,7 +26,7 @@ SECRET_PATTERNS = (
     re.compile(r"sk-(?:live|test|proj|ant)-[A-Za-z0-9]{10,}"),
 )
 
-SKIP_DIRS = {".git", ".venv", "venv", "dist", "__pycache__", ".pytest_cache"}
+SKIP_DIRS = {".git", ".venv", "venv", "dist", "__pycache__", ".pytest_cache", "var", ".vercel"}
 
 FLOW_SNIPPETS = (
     "version: v1",
@@ -160,6 +160,8 @@ def package() -> Path:
         "deploy",
         "candidates",
         "tests",
+        "static",
+        "api",
     ]
     include_files = [
         "LICENSE",
@@ -168,6 +170,7 @@ def package() -> Path:
         ".gitlab-ci.yml",
         ".env.example",
         "Makefile",
+        "vercel.json",
     ]
     if destination.exists():
         destination.unlink()
@@ -225,7 +228,7 @@ def _files():
             continue
         if any(part in SKIP_DIRS for part in path.parts):
             continue
-        if path.suffix in {".png", ".webp", ".jpg", ".gif", ".zip"}:
+        if path.suffix in {".png", ".webp", ".jpg", ".gif", ".zip", ".mp4", ".ico"}:
             continue
         yield path
 

@@ -85,7 +85,7 @@ The flow does not call this agent. Duo custom flows build their own agents from 
 3. Description: copy the `description` from `agents/radar-curator.yml`.
 4. System prompt: copy the `system_prompt` block from that file.
 5. Tools: Read file, Grep, Find files, Run command, Get merge request. Names in the file are `read_file`, `grep`, `find_files`, `run_command`, `get_merge_request`.
-6. If the form has MCP tools, add `query_board`, `list_closing`, `list_eligible`, `list_by_prize`, `get_opportunity`, `board_status`.
+6. If the form has MCP tools, add `query_board`, `list_closing`, `list_eligible`, `list_by_prize`, `get_opportunity`, `board_status`, `jar_status`, `create_bounty_order`.
 7. Create, then enable the agent for this project.
 
 ## 6. Point Duo at the MCP server

@@ -7,6 +7,9 @@ system_prompt: |
   next 7 days. Times are shown in Asia/Singapore.
   Use the Hack Heat Live MCP tools (query_board, list_closing, list_eligible,
   list_by_prize, get_opportunity, board_status) when they are available.
+  For bounty jars (PayPal sandbox), use jar_status to rank the jars of
+  hackathons closing this week. create_bounty_order only returns an approval
+  link: give it to the person, never claim the payment happened.
   For a candidate row in a merge request, run:
   python3 -m hackheat.curator validate PATH
   Report the verdict, the countdown, and whether the call is open to PH/SG.
@@ -26,3 +29,5 @@ mcp_tools:
   - list_by_prize
   - get_opportunity
   - board_status
+  - jar_status
+  - create_bounty_order
