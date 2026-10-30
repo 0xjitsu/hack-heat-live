@@ -65,3 +65,54 @@ Register the flow in the provisioned GitLab project, record the three-minute dem
 - Autonomy: Supervised
 - Google Cloud bonus: deployment code is in `deploy/cloudrun/`. Add the live URL on the form only after the service is public.
 - Environment prize: opt in only if you want to. Paste the summary from `docs/SCI.md`.
+
+---
+
+# PayPal AI Hackathon fields (bounty jar, v0)
+
+Closes Thu 12 Nov 2026, 12:00 PST. Everything below runs in the PayPal **sandbox**.
+
+## Title
+
+Hack Heat Live: bounty jars for hackathons
+
+## Tagline
+
+Put a few dollars behind the hackathon you want built, and let an agent find which jars are heating up before the deadline.
+
+## What it does
+
+Hack Heat Live is a Southeast Asia hackathon radar with live countdowns. Every card on the radar now has a bounty jar. Anyone can add $1, $5, or $10 through PayPal Checkout. The jar shows the running total, so builders can see where people want work done. When the jar is paid out, a winner is paid through a payout provider.
+
+The same jar is available to AI agents through the app's Model Context Protocol server. Ask Claude or GitLab Duo *"which hackathons closing this week have the biggest jars?"*. The agent calls `jar_status`, ranks the closing-this-week hackathons by sandbox jar total, and can call `create_bounty_order` to start a pledge. The agent gets back a PayPal approval link and hands it to the person. It cannot move money on its own.
+
+## PayPal integration
+
+- **PayPal JS SDK buttons** on each card (Checkout, `intent=capture`, USD).
+- **Orders v2**, server side: `POST /v2/checkout/orders` with the board row id as `reference_id`, then `POST /v2/checkout/orders/{id}/capture`. A pledge is counted only when the capture is `COMPLETED` and the `reference_id` matches the card. Captures are idempotent per order.
+- **OAuth 2.0 client credentials** with a cached token.
+- **Payouts API** behind a `PayoutProvider` interface (`hackheat/payouts.py`), so a jar can pay a winner. A NEAR Intents provider is stubbed for a later cross-chain payout.
+- Sandbox only. `PAYPAL_ENV` other than `sandbox` disables the jar, so a live key cannot be used by mistake.
+
+## AI integration
+
+- MCP tools `jar_status`, `create_bounty_order`, and `capture_bounty_order` sit next to the existing board tools (`query_board`, `list_closing`, …) in one server, over stdio and `POST /mcp`.
+- The agent combines two signals: board timing ("closing this week") and money ("biggest jar"). That ranking is computed from live data, not from a prompt.
+- Human in the loop: the agent creates the order and a person approves it in PayPal.
+
+## How we built it
+
+Python 3.11+ standard library only, the same as the radar. We tried the `paypal-agent-toolkit` Python package first. Version 1.11.0 pins LangChain, CrewAI tools, and the OpenAI Agents SDK, which would end the no-install setup, so the three REST calls go through `urllib` and the MCP tools live in our own server. Deployed as a Vercel Python function (`api/index.py`) and as the existing Cloud Run container.
+
+## Challenges
+
+- Counting money once. The capture endpoint checks status, matching row, and duplicate order ids under a lock before a pledge is stored.
+- Ephemeral hosting. Vercel functions lose their files, so the hosted demo keeps the jar in memory (known v0 limit). Locally it is a JSON file.
+
+## Try it
+
+See the README section **Bounty jar (PayPal sandbox)**: create a sandbox REST app, set `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_ENV=sandbox`, run `python3 -m hackheat.http_api`, and pay with a sandbox buyer account. Without keys the page shows the jar in a "Sandbox keys not configured" demo state.
+
+## Built with
+
+Python · PayPal JS SDK · PayPal Orders v2 · PayPal Payouts · Model Context Protocol · Claude · GitLab Duo · Vercel · Google Cloud Run

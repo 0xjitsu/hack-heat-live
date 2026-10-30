@@ -4,7 +4,7 @@ Hack Heat is a weekly Southeast Asia hackathon and bounty board. Hack Heat Live 
 
 **Path A, Start Fresh. Autonomy: Supervised.** A Duo flow reviews a new row and a person approves the outcome. The flow does not merge, and it does not deploy.
 
-MIT licensed. No API keys.
+MIT licensed. The board needs no API keys. The optional [bounty jar](#bounty-jar-paypal-sandbox) uses PayPal sandbox keys.
 
 ## Judge path, under five minutes
 
@@ -53,7 +53,7 @@ PH/SG handling follows the row text. Where a row says it uses the standard Devpo
 
 Three pieces, all in the repo:
 
-1. **MCP client.** `.gitlab/duo/mcp.json` starts this server over stdio and pre-approves `query_board`, `list_closing`, `list_eligible`, `list_by_prize`, `get_opportunity`, and `board_status`. Duo CLI and the IDE extension load that file. `POST /mcp` speaks the same JSON-RPC for a remote client after Cloud Run.
+1. **MCP client.** `.gitlab/duo/mcp.json` starts this server over stdio and pre-approves `query_board`, `list_closing`, `list_eligible`, `list_by_prize`, `get_opportunity`, `board_status`, and the bounty jar tools `jar_status`, `create_bounty_order`, `capture_bounty_order`. Pre-approving the order tool is safe because it only returns a PayPal approval link; a person still approves the payment. Duo CLI and the IDE extension load that file. `POST /mcp` speaks the same JSON-RPC for a remote client after Cloud Run.
 2. **Custom flow.** `flows/radar-curator.yml` is flow-registry v1. Paste it into **AI → Flows**. `curator_agent` runs `python3 -m hackheat.curator validate` on the candidate in the merge request. `outcome_gate` is one `HumanInputComponent` (Approve / Modify / Reject). `publisher_agent` runs only after Approve, posts the review, and applies the row with `--approved-by`. Per-tool approval is off. One human decision is the Supervised level. Assisted would have stopped on every tool. Hands-off would have merged and deployed with nobody watching.
 3. **Flow execution config.** `.gitlab/duo/agent-config.yml` makes `python3` resolve in GitLab's default flow image, so the curator can run the validator. GitLab reads it from the default branch only.
 4. **Custom agent.** `agents/radar-curator.yml` is the chat/IDE agent. Custom flows do not call a catalog agent. They carry their own prompts. The agent exists so Duo Chat can ask the board through MCP without starting the write flow.
@@ -103,9 +103,49 @@ python3 -m hackheat.mcp_server
 
 Messages are one JSON object per line. Logs go to stderr.
 
+## Bounty jar (PayPal sandbox)
+
+Every radar card has a bounty jar: the sandbox total pledged to that hackathon, and `+$1`, `+$5`, `+$10` buttons. A button opens PayPal Checkout (JS SDK). The server creates the order with Orders v2 and captures it after the payer approves. A pledge counts only when the capture comes back `COMPLETED` for the same board row. Capturing the same order twice does not count it twice.
+
+The AI side is the MCP server. An agent (GitLab Duo, Claude, any MCP client) can ask *"which hackathons closing this week have the biggest jars?"* (`jar_status`), then add to one (`create_bounty_order`). That returns a PayPal approval link for a person to open. No money moves until a person approves, and `capture_bounty_order` books it.
+
+| Method | Path | Body |
+|---|---|---|
+| GET | `/api/bounty/<id>` | Jar total, pledge count, whether keys are configured |
+| POST | `/api/bounty/<id>/order` | `{"amount": 1 \| 5 \| 10}` → `{id, approveUrl}` |
+| POST | `/api/bounty/<id>/capture` | `{"orderID": "..."}` → jar after capture |
+
+**Without keys** the app runs exactly as before. Each card shows the jar at $0.00 with disabled buttons and "Sandbox keys not configured", the order and capture endpoints return 503, and the MCP tools return a tool error that says so.
+
+**Set it up (judges, about 5 minutes):**
+
+1. Sign in at [developer.paypal.com](https://developer.paypal.com) → **Apps & Credentials** → toggle **Sandbox** → **Create App** (type: Merchant). Copy the Client ID and Secret.
+2. **Testing Tools → Sandbox Accounts** already has a Personal (buyer) account. Use its email and password in the PayPal popup.
+3. Run locally:
+   ```bash
+   export PAYPAL_CLIENT_ID=...  PAYPAL_CLIENT_SECRET=...  PAYPAL_ENV=sandbox
+   python3 -m hackheat.http_api
+   ```
+   Open http://127.0.0.1:8080, press `+$5` on a card, and pay with the sandbox buyer.
+4. On Vercel: Project → Settings → Environment Variables, add the same three names (secret marked Sensitive), then redeploy.
+
+Pledges live in `var/bounties.json` locally (gitignored). On Vercel the filesystem is ephemeral, so the jar is in memory and resets on a cold start. That is a known v0 limit, marked `TODO(bounty-jar)` in `hackheat/bounty.py`.
+
+**Payouts.** `hackheat/payouts.py` is the seam that pays a winner from the jar. `PayPalPayout` uses the sandbox Payouts API. `NearIntentsPayout` is a stub that raises `NotImplementedError`. It marks where a NEAR Intents settlement goes for the NEAR hackathon. Nothing calls a payout automatically; a person decides who won.
+
+**Why not `paypal-agent-toolkit`?** Version 1.11.0 hard-pins `langchain`, `crewai-tools`, and `openai-agents`. This repo runs with no `pip install`, so `hackheat/paypal.py` calls the same REST endpoints with `urllib`: OAuth client credentials, Orders v2 create and capture, Payouts. The bounty tools ship in this repo's own MCP server instead.
+
+## Vercel
+
+`api/index.py` wraps the same `Handler` the Docker image runs, and `vercel.json` rewrites every path to it. The Cloud Run path is unchanged.
+
+```bash
+vercel deploy        # preview
+```
+
 ## Configuration
 
-Copy `.env.example` if you want a reminder. The process reads the environment. There is no secret.
+Copy `.env.example` if you want a reminder. The process reads the environment. The only secret is the optional PayPal sandbox client secret.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -113,6 +153,10 @@ Copy `.env.example` if you want a reminder. The process reads the environment. T
 | `HACKHEAT_HOST` | `0.0.0.0` | Bind address |
 | `HACKHEAT_NOW` | current time | Freeze the clock, ISO 8601 |
 | `HACKHEAT_BOARD` | `data/opportunities.json` | Board file |
+| `PAYPAL_CLIENT_ID` | unset | PayPal sandbox REST app client id. Public, it goes into the page for the JS SDK |
+| `PAYPAL_CLIENT_SECRET` | unset | PayPal sandbox secret. Server only, never logged or rendered |
+| `PAYPAL_ENV` | `sandbox` | Anything other than `sandbox` turns the jar off. v0 never touches live PayPal |
+| `HACKHEAT_BOUNTY_STORE` | `var/bounties.json` | Pledge file. `:memory:` keeps it in RAM. On Vercel it is always in RAM |
 
 ## Tests and CI
 
