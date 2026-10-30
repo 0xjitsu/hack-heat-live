@@ -8,15 +8,18 @@ from __future__ import annotations
 import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
-from hackheat import __version__
-from hackheat.board import HACKATHON_FORMATS, load_board
+from hackheat import __version__, bounty, paypal
+from hackheat.board import HACKATHON_FORMATS, ROOT, load_board
 from hackheat.mcp_server import handle_message
 from hackheat.query import Intent, answer_intent, answer_question, answer_to_dict
 from hackheat.timeutil import format_sgt, now
 
 HOST = "0.0.0.0"
+STATIC = ROOT / "static"
+STATIC_TYPES = {".svg": "image/svg+xml", ".png": "image/png", ".mp4": "video/mp4"}
 
 
 def bind_host() -> str:
@@ -42,7 +45,22 @@ class Handler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
         if path == "/":
             question = _first(query, "q") or "what hackathons close this week?"
-            self._html(200, render_page(answer_question(question)))
+            self._html(200, render_page(answer_question(question), origin=self._origin()))
+            return
+        if path == "/favicon.ico":
+            self._static("apple-touch-icon.png")
+            return
+        if path.startswith("/static/"):
+            self._static(path[len("/static/"):])
+            return
+        if path.startswith("/api/bounty/"):
+            item_id = path[len("/api/bounty/"):]
+            try:
+                bounty._require_row(item_id)
+            except bounty.BountyError as exc:
+                self._json(exc.status, {"error": str(exc)})
+                return
+            self._json(200, bounty.jar(item_id))
             return
         if path == "/api/health":
             self._json(200, health_payload())
@@ -84,6 +102,23 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._json(200, answer_to_dict(answer_question(question)))
             return
+        if path.startswith("/api/bounty/") and path.endswith(("/order", "/capture")):
+            item_id, _, action = path[len("/api/bounty/"):].rpartition("/")
+            try:
+                body = json.loads(raw.decode("utf-8") or "{}")
+            except json.JSONDecodeError:
+                self._json(400, {"error": "Body must be JSON."})
+                return
+            try:
+                if action == "order":
+                    payload = bounty.create_order(item_id, body.get("amount"))
+                else:
+                    payload = bounty.capture_order(item_id, str(body.get("orderID") or ""))
+            except bounty.BountyError as exc:
+                self._json(exc.status, {"error": str(exc)})
+                return
+            self._json(200, payload)
+            return
         if path == "/mcp":
             if not raw.strip():
                 self._json(400, {"error": "JSON-RPC body required."})
@@ -116,6 +151,29 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _origin(self) -> str:
+        public = os.environ.get("HACKHEAT_PUBLIC_URL", "").rstrip("/")
+        if public:
+            return public
+        host = self.headers.get("X-Forwarded-Host") or self.headers.get("Host")
+        if not host:
+            return ""
+        proto = self.headers.get("X-Forwarded-Proto") or "http"
+        return f"{proto}://{host}"
+
+    def _static(self, name: str) -> None:
+        path = (STATIC / name).resolve()
+        if path.parent != STATIC.resolve() or path.suffix not in STATIC_TYPES or not path.is_file():
+            self._json(404, {"error": "Not found"})
+            return
+        body = path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", STATIC_TYPES[path.suffix])
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "public, max-age=86400")
         self.end_headers()
         self.wfile.write(body)
 
@@ -212,9 +270,69 @@ def _first(query: dict[str, list[str]], key: str) -> str | None:
     return value or None
 
 
-def render_page(answer) -> str:
+JAR_SCRIPT = """
+<script>
+document.querySelectorAll('.jar button[data-amount]').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    var jar = btn.closest('.jar'), id = jar.dataset.id, amount = Number(btn.dataset.amount);
+    var note = jar.querySelector('.jar-note'), box = jar.querySelector('.jar-paypal');
+    var post = function (action, body) {
+      return fetch('/api/bounty/' + encodeURIComponent(id) + '/' + action, {
+        method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(body)
+      }).then(function (r) { return r.json(); });
+    };
+    box.innerHTML = '';
+    if (!window.paypal) { note.textContent = 'PayPal SDK did not load.'; return; }
+    note.textContent = 'Adding $' + amount + ' (sandbox). Pay with a sandbox buyer account.';
+    window.paypal.Buttons({
+      createOrder: function () {
+        return post('order', {amount: amount}).then(function (d) {
+          if (!d.id) { throw new Error(d.error || 'Order failed'); }
+          return d.id;
+        });
+      },
+      onApprove: function (data) {
+        return post('capture', {orderID: data.orderID}).then(function (d) {
+          if (!d.jar) { note.textContent = d.error || 'Capture failed'; return; }
+          jar.querySelector('.jar-total strong').textContent = '$' + d.jar.totalUsd.toFixed(2);
+          note.textContent = 'Added. Thank you.';
+          box.innerHTML = '';
+        });
+      },
+      onError: function (err) { note.textContent = String(err && err.message || err); }
+    }).render(box);
+  });
+});
+</script>
+"""
+
+
+def _jar_html(item_id: str, total: float, configured: bool) -> str:
     from html import escape
 
+    disabled = "" if configured else " disabled"
+    buttons = "".join(
+        f"<button type='button' data-amount='{amount}'{disabled}>+${amount}</button>" for amount in bounty.PRESET_AMOUNTS_USD
+    )
+    note = "" if configured else "Sandbox keys not configured. Demo state: set PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET to take sandbox pledges."
+    return (
+        f"<div class='jar' data-id='{escape(item_id)}'>"
+        f"<p class='jar-total'>Bounty jar <strong>${total:,.2f}</strong> <span>PayPal sandbox</span></p>"
+        f"<div class='jar-amounts'>{buttons}</div>"
+        "<div class='jar-paypal'></div>"
+        f"<p class='jar-note' aria-live='polite'>{escape(note)}</p>"
+        "</div>"
+    )
+
+
+DESCRIPTION = "Weekly Southeast Asia hackathon radar with live countdowns, an MCP server, and PayPal sandbox bounty jars on every card."
+
+
+def render_page(answer, origin: str = "") -> str:
+    from html import escape
+
+    configured = paypal.configured()
+    totals = bounty.totals()
     rows = []
     for index, hit in enumerate(answer.hits, start=1):
         item = hit.item
@@ -229,7 +347,8 @@ def render_page(answer) -> str:
             f"<p class='meta'>{escape(prize)} · {escape(item.lane or 'lane n/a')} · {escape(geo_label)}</p>"
             f"<p>{escape(item.fit)}</p>"
             f"<p><a href='{escape(item.apply_url)}'>{escape(item.apply_url)}</a></p>"
-            "</article>"
+            + _jar_html(item.id, totals.get(item.id, 0.0), configured)
+            + "</article>"
         )
     if not rows:
         rows.append("<p class='empty'>Nothing on the board matches that question.</p>")
@@ -244,6 +363,11 @@ def render_page(answer) -> str:
         ("which ones are open to PH/SG?", "Open to PH/SG"),
         ("which have prizes over $10k?", "Prizes over $10k"),
     ]
+    sdk = (
+        f'<script src="https://www.paypal.com/sdk/js?client-id={quote(paypal.client_id())}&currency=USD&intent=capture" async></script>'
+        if configured
+        else ""
+    )
     links = " ".join(
         f"<a class='chip' href='/?q={quote(q)}'>{escape(label)}</a>" for q, label in examples
     )
@@ -253,6 +377,26 @@ def render_page(answer) -> str:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Hack Heat Live</title>
+<meta name="description" content="{escape(DESCRIPTION)}">
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/static/apple-touch-icon.png" type="image/png" sizes="180x180">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Hack Heat Live">
+<meta property="og:description" content="{escape(DESCRIPTION)}">
+<meta property="og:url" content="{escape(origin)}/">
+<meta property="og:image" content="{escape(origin)}/static/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:video" content="{escape(origin)}/static/og.mp4">
+<meta property="og:video:type" content="video/mp4">
+<meta property="og:video:width" content="1200">
+<meta property="og:video:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Hack Heat Live">
+<meta name="twitter:description" content="{escape(DESCRIPTION)}">
+<meta name="twitter:image" content="{escape(origin)}/static/og.png">
+{sdk}
 <style>
   :root {{ color-scheme: light; --ink:#1c1915; --paper:#f3ecdf; --heat:#9a3412; --line:#d9cbb8; }}
   * {{ box-sizing: border-box; }}
@@ -272,6 +416,14 @@ def render_page(answer) -> str:
   h2 {{ font-size:1.45rem; margin:0 0 .3rem; }}
   .meta, .check {{ font: .95rem/1.4 ui-sans-serif, system-ui, sans-serif; }}
   a {{ color:var(--heat); }}
+  .jar {{ margin-top:.6rem; padding:.6rem .75rem; border:1px dashed var(--line); font: .9rem/1.4 ui-sans-serif, system-ui, sans-serif; }}
+  .jar-total {{ margin:0 0 .4rem; }}
+  .jar-total span {{ color:#6b5d4d; font-size:.8rem; }}
+  .jar-amounts {{ display:flex; gap:.4rem; }}
+  .jar-amounts button {{ min-height:44px; min-width:44px; }}
+  .jar-amounts button[disabled] {{ opacity:.45; cursor:not-allowed; }}
+  .jar-paypal {{ margin-top:.5rem; max-width:20rem; }}
+  .jar-note {{ margin:.4rem 0 0; color:#6b5d4d; }}
   footer {{ margin-top:2rem; font: .85rem/1.4 ui-sans-serif, system-ui, sans-serif; }}
 </style>
 </head>
@@ -295,6 +447,7 @@ def render_page(answer) -> str:
     “This week” means the next 7 days. Set <code>HACKHEAT_NOW</code> to freeze the clock for a demo.
   </footer>
 </main>
+{JAR_SCRIPT if configured else ""}
 </body>
 </html>
 """
