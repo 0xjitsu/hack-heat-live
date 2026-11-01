@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+"""agent-cli: one place for the lookups and checks agents repeat in this repo.
+
+Read-only. Stdlib only. Every subcommand takes --json. Run with no args for the list.
+"""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import json
+import re
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+TOKEN = re.compile(
+    r"(ghp_|github_pat_|glpat-|xox[baprs]-|sk-(?:live|test|proj|ant)-|AKIA|Bearer\s+)[A-Za-z0-9_\-]{8,}"
+)
+
+
+def mask(text: str) -> str:
+    return TOKEN.sub(lambda m: m.group(1) + "***", text)
+
+
+def sh(*cmd: str, timeout: int = 300) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=timeout)
+
+
+# --- subcommands: each returns (text, data, ok) -----------------------------
+
+
+def cmd_overview(args):
+    """Branch, dirty files, last commit, modules with line counts, tests, make targets."""
+    branch = sh("git", "branch", "--show-current").stdout.strip()
+    dirty = [l for l in sh("git", "status", "--porcelain").stdout.splitlines() if l]
+    head = sh("git", "log", "-1", "--format=%h %s").stdout.strip()
+    modules = {}
+    for p in sorted((ROOT / "hackheat").glob("*.py")):
+        src = p.read_text(encoding="utf-8")
+        defs = [n.name for n in ast.parse(src).body if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and not n.name.startswith("_")]
+        modules[p.name] = {"lines": src.count("\n"), "defs": defs}
+    tests = [p.name for p in sorted((ROOT / "tests").glob("test_*.py"))]
+    targets = re.findall(r"^([a-z][\w-]*):", (ROOT / "Makefile").read_text(), re.M)
+    data = {"branch": branch, "dirty": dirty, "head": head, "modules": modules, "tests": tests, "make": targets}
+    lines = [f"branch {branch} · head {head} · dirty {len(dirty)}"]
+    lines += [f"  {d}" for d in dirty[:10]]
+    lines += [f"hackheat/{n} {m['lines']}L: {', '.join(m['defs']) or '-'}" for n, m in modules.items()]
+    lines += [f"tests: {' '.join(tests)}", f"make: {' '.join(targets)}"]
+    return "\n".join(lines), data, True
+
+
+def cmd_routes(args):
+    """HTTP routes served by hackheat/http_api.py (method, path, match kind)."""
+    tree = ast.parse((ROOT / "hackheat" / "http_api.py").read_text(encoding="utf-8"))
+    rows = []
+    for fn in ast.walk(tree):
+        if not (isinstance(fn, ast.FunctionDef) and fn.name in ("do_GET", "do_POST")):
+            continue
+        method = fn.name[3:]
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Compare) and isinstance(node.left, ast.Name) and node.left.id == "path":
+                for c in node.comparators:
+                    if isinstance(c, ast.Constant):
+                        rows.append({"method": method, "path": c.value, "match": "exact"})
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "startswith"
+                    and isinstance(node.func.value, ast.Name) and node.func.value.id == "path"):
+                rows.append({"method": method, "path": node.args[0].value + "<id>", "match": "prefix"})
+    text = "\n".join(f"{r['method']:4} {r['path']}" for r in rows)
+    return text, rows, bool(rows)
+
+
+def cmd_tools(args):
+    """MCP tools from hackheat/mcp_server.py with args (* = required)."""
+    from hackheat.mcp_server import TOOLS
+
+    rows = []
+    for t in TOOLS:
+        schema = t["inputSchema"]
+        req = set(schema.get("required", []))
+        params = [f"{k}{'*' if k in req else ''}:{v.get('type', '?')}" for k, v in schema.get("properties", {}).items()]
+        rows.append({"name": t["name"], "args": params, "summary": t["description"].split(". ")[0].rstrip(".")})
+    text = "\n".join(f"{r['name']}({', '.join(r['args'])}) — {r['summary']}" for r in rows)
+    return text, rows, bool(rows)
+
+
+def cmd_ci(args):
+    """What CI runs: each command → Makefile target / GitHub job / GitLab job."""
+    where: dict[str, list[str]] = {}
+
+    def add(cmd, src):
+        cmd = re.sub(r"^python3? ", "python ", cmd.strip())
+        where.setdefault(cmd, []).append(src)
+
+    lines = (ROOT / "Makefile").read_text().splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(r"^([a-z][\w-]*):", line)
+        if m and i + 1 < len(lines) and lines[i + 1].startswith("\t"):
+            add(lines[i + 1], f"make:{m.group(1)}")
+    job = None
+    for line in (ROOT / ".github" / "workflows" / "ci.yml").read_text().splitlines():
+        m = re.match(r"^  ([\w-]+):\s*$", line)
+        job = m.group(1) if m else job
+        m = re.match(r"^\s+(?:run: |  )(python .+)$", line)
+        if m and job:
+            add(m.group(1), f"gh:{job}")
+    job = None
+    for line in (ROOT / ".gitlab-ci.yml").read_text().splitlines():
+        m = re.match(r"^([\w-]+):\s*$", line)
+        job = m.group(1) if m else job
+        m = re.match(r"^\s+- (python .+)$", line)
+        if m and job:
+            add(m.group(1), f"gl:{job}")
+    rows = [{"cmd": c, "where": w} for c, w in where.items()]
+    return "\n".join(f"{r['cmd']}  [{' '.join(r['where'])}]" for r in rows), rows, bool(rows)
+
+
+def cmd_test(args):
+    """Run the unittest suite; print counts and failing test ids only."""
+    t0 = time.time()
+    cmd = [sys.executable, "-m", "unittest"] + (args.names or ["discover", "-s", "tests"])
+    proc = sh(*cmd)
+    out = proc.stderr + proc.stdout
+    ran = re.search(r"Ran (\d+) tests? in ([\d.]+)s", out)
+    failing = re.findall(r"^(?:FAIL|ERROR): (\S+ \([^)]+\))", out, re.M)
+    data = {"ok": proc.returncode == 0, "ran": int(ran.group(1)) if ran else 0, "failing": failing, "seconds": round(time.time() - t0, 2)}
+    text = f"{'ok' if data['ok'] else 'FAILED'} · {data['ran']} tests · {data['seconds']}s"
+    if failing:
+        text += "\n" + "\n".join(f"  {f}" for f in failing)
+    if not data["ok"] and not failing:
+        text += "\n" + out[-1500:]
+    return text, data, data["ok"]
+
+
+CHECKS = ("lint", "secrets", "freshness", "deploy-check")
+
+
+def cmd_check(args):
+    """Run hackheat.ci checks (lint, secrets, freshness, deploy-check). Skips package (writes dist/)."""
+    rows = []
+    for name in args.only or CHECKS:
+        proc = sh(sys.executable, "-m", "hackheat.ci", name)
+        msg = (proc.stdout.strip() or proc.stderr.strip()).splitlines()
+        rows.append({"check": name, "ok": proc.returncode == 0, "msg": msg[0] if msg else ""})
+        if proc.returncode and len(msg) > 1:
+            rows[-1]["detail"] = msg[1:20]
+    ok = all(r["ok"] for r in rows)
+    text = "\n".join(f"{'ok  ' if r['ok'] else 'FAIL'} {r['check']}: {r['msg']}" + "".join(f"\n     {d}" for d in r.get("detail", [])) for r in rows)
+    return text, rows, ok
+
+
+def cmd_refs(args):
+    """Where a term appears in tracked files (code, docs, config, CI). Fixed-string, case-sensitive."""
+    proc = sh("git", "grep", "-n", "-I", "-F", "--", args.term)
+    hits = []
+    for line in proc.stdout.splitlines():
+        path, num, text = line.split(":", 2)
+        hits.append({"file": path, "line": int(num), "text": text.strip()[:140]})
+    text = "\n".join(f"{h['file']}:{h['line']}: {h['text']}" for h in hits[: args.limit])
+    if len(hits) > args.limit:
+        text += f"\n… {len(hits) - args.limit} more (--limit)"
+    return (text or f"no refs to {args.term!r}"), hits, proc.returncode in (0, 1)
+
+
+SMOKE = [
+    ("GET", "/api/health", None),
+    ("GET", "/api/freshness", None),
+    ("GET", "/api/query?q=what+hackathons+close+this+week%3F", None),
+    ("GET", "/api/opportunities", None),
+    ("GET", "/", None),
+    ("POST", "/mcp", {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+]
+
+
+def cmd_smoke(args):
+    """GET the API paths (+ MCP tools/list) on --url, or on a throwaway local server."""
+    server = None
+    base = (args.url or "").rstrip("/")
+    if not base:
+        from hackheat.http_api import Handler, make_server
+
+        Handler.log_message = lambda *a: None
+        server = make_server("127.0.0.1", 0)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+    rows, health = [], None
+    for method, path, body in SMOKE:
+        data = json.dumps(body).encode() if body else None
+        req = urllib.request.Request(base + path, data=data, method=method, headers={"Content-Type": "application/json"})
+        t0 = time.time()
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                status, payload = resp.status, resp.read()
+        except urllib.error.HTTPError as e:
+            status, payload = e.code, b""
+        except (urllib.error.URLError, TimeoutError) as e:
+            status, payload = 0, str(e).encode()
+        rows.append({"method": method, "path": path.split("?")[0], "status": status, "ms": int((time.time() - t0) * 1000), "bytes": len(payload)})
+        if path == "/api/health" and status == 200:
+            health = json.loads(payload)
+    if server:
+        server.shutdown()
+    ok = all(r["status"] == 200 for r in rows)
+    text = f"{base}" + (f" · v{health['version']} rows {health['rows']} open {health['open']} updated {health['updatedAt']}" if health else "")
+    text += "\n" + "\n".join(f"{r['status']} {r['method']:4} {r['path']} {r['ms']}ms {r['bytes']}B" for r in rows)
+    return text, {"base": base, "health": health, "results": rows}, ok
+
+
+COMMANDS = {
+    "overview": cmd_overview,
+    "routes": cmd_routes,
+    "tools": cmd_tools,
+    "ci": cmd_ci,
+    "test": cmd_test,
+    "check": cmd_check,
+    "refs": cmd_refs,
+    "smoke": cmd_smoke,
+}
+
+
+def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if not argv:
+        for name, fn in COMMANDS.items():
+            print(f"{name:9} {fn.__doc__.splitlines()[0]}")
+        return 0
+    parser = argparse.ArgumentParser(prog="agent-cli", description=__doc__.strip().splitlines()[0])
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    for name, fn in COMMANDS.items():
+        p = sub.add_parser(name, help=fn.__doc__, description=fn.__doc__)
+        p.add_argument("--json", action="store_true", help="machine-readable output")
+        if name == "test":
+            p.add_argument("names", nargs="*", help="unittest ids, e.g. tests.test_http (default: discover tests/)")
+        if name == "check":
+            p.add_argument("--only", action="append", choices=CHECKS, help="run just this check (repeatable)")
+        if name == "refs":
+            p.add_argument("term")
+            p.add_argument("--limit", type=int, default=40)
+        if name == "smoke":
+            p.add_argument("--url", help="base URL of a running deploy (default: local throwaway server)")
+    args = parser.parse_args(argv)
+    try:
+        text, data, ok = COMMANDS[args.cmd](args)
+    except Exception as e:  # report, never traceback-spam the caller
+        text, data, ok = f"error: {type(e).__name__}: {e}", {"error": str(e)}, False
+    print(mask(json.dumps(data, ensure_ascii=False) if args.json else text))
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

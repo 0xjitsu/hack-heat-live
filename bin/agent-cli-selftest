@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Smoke test for bin/agent-cli: every subcommand's --help, then one real call each.
+set -u
+cd "$(dirname "$0")/.."
+cli=bin/agent-cli
+fail=0
+run() { if "$@" >/dev/null 2>&1; then echo "ok   $*"; else echo "FAIL $*"; fail=1; fi; }
+
+run $cli
+for sub in $($cli | awk '{print $1}'); do run $cli "$sub" --help; done
+
+run $cli overview --json
+run $cli routes
+run $cli tools --json
+run $cli ci
+run $cli test tests.test_query
+run $cli check --only secrets
+run $cli refs board_status
+run $cli smoke --json
+# --json must be valid JSON
+$cli tools --json | python3 -c 'import json,sys; json.load(sys.stdin)' && echo "ok   tools --json parses" || { echo "FAIL tools --json parses"; fail=1; }
+exit $fail
