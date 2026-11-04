@@ -6,6 +6,7 @@ WORKDIR /app
 # tzdata. The process stays small and scales to zero on Cloud Run.
 COPY hackheat ./hackheat
 COPY data ./data
+COPY static ./static
 COPY flows ./flows
 COPY agents ./agents
 

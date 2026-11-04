@@ -10,7 +10,10 @@
         "list_eligible",
         "list_by_prize",
         "get_opportunity",
-        "board_status"
+        "board_status",
+        "jar_status",
+        "create_bounty_order",
+        "capture_bounty_order"
       ]
     }
   }

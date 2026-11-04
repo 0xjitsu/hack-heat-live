@@ -10,7 +10,7 @@ import json
 import sys
 from typing import Any
 
-from hackheat import __version__
+from hackheat import __version__, bounty
 from hackheat.board import load_board
 from hackheat.query import answer_question, answer_to_dict
 from hackheat.timeutil import format_sgt, now
@@ -95,6 +95,44 @@ TOOLS: list[dict[str, Any]] = [
         "name": "board_status",
         "description": "Report how many rows are open right now and when the board file was updated.",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "jar_status",
+        "description": (
+            "Bounty jar totals (PayPal sandbox, USD). With opportunity_id, one row's jar. "
+            "Without it, every hackathon closing this week, biggest jar first."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"opportunity_id": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "create_bounty_order",
+        "description": (
+            "Create a PayPal sandbox Checkout order that adds a micro-bounty to a row's jar. "
+            "Returns approveUrl: a person opens it and approves the payment. No money moves until then."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "opportunity_id": {"type": "string"},
+                "amount_usd": {"type": "integer", "enum": list(bounty.PRESET_AMOUNTS_USD)},
+            },
+            "required": ["opportunity_id", "amount_usd"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "capture_bounty_order",
+        "description": "After the payer approved an order, capture it and add it to the jar.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"opportunity_id": {"type": "string"}, "order_id": {"type": "string"}},
+            "required": ["opportunity_id", "order_id"],
+            "additionalProperties": False,
+        },
     },
 ]
 
@@ -197,7 +235,33 @@ def _call_tool(name: str, arguments: dict) -> dict:
             f"{payload['open']} of {payload['rows']} calls are still open as of {payload['asOfSgt']}.\n"
         )
         return _tool_result(text, payload)
+    if name in {"jar_status", "create_bounty_order", "capture_bounty_order"}:
+        return _bounty_tool(name, arguments)
     raise _ToolError(f"Unknown tool: {name}")
+
+
+def _bounty_tool(name: str, arguments: dict) -> dict:
+    item_id = str(arguments.get("opportunity_id") or "").strip()
+    try:
+        if name == "jar_status":
+            if item_id:
+                bounty._require_row(item_id)
+                payload = bounty.jar(item_id)
+                return _tool_result(f"{item_id}: ${payload['totalUsd']:.2f} from {payload['pledges']} pledges (sandbox).\n", payload)
+            rows = bounty.jars_closing_this_week()
+            lines = [f"{i}. {r['name']} ({r['opportunityId']}): ${r['totalUsd']:.2f}, {r['countdown']}" for i, r in enumerate(rows, 1)]
+            text = "Bounty jars, hackathons closing this week, biggest first:\n" + ("\n".join(lines) or "None closing this week.") + "\n"
+            return _tool_result(text, {"jars": rows, "configured": bounty.paypal.configured()})
+        if not item_id:
+            raise _ToolError("opportunity_id is required")
+        if name == "create_bounty_order":
+            order = bounty.create_order(item_id, arguments.get("amount_usd"))
+            text = f"Sandbox order {order['id']} for ${order['amountUsd']} on {item_id}. Approve it here: {order['approveUrl']}\n"
+            return _tool_result(text, order)
+        result = bounty.capture_order(item_id, str(arguments.get("order_id") or ""))
+        return _tool_result(f"Captured. {item_id} jar is now ${result['jar']['totalUsd']:.2f}.\n", result)
+    except bounty.BountyError as exc:
+        raise _ToolError(str(exc)) from None
 
 
 def _closing_question(window: str, hackathons_only: bool) -> str:
